@@ -2,11 +2,19 @@ import sqlite3
 import os
 import openai
 import datetime
+import time
+
+import logging
+
+logger = logging.getLogger(__name__)
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LLM_RETRIES = int(os.getenv("LLM_RETRIES", 3))  # type: ignore
+LLM_RETRY_DELAY_SECONDS = int(os.getenv("LLM_RETRY_DELAY_SECONDS", 2))  # type: ignore
 
 
 class LLMManager:
@@ -14,6 +22,8 @@ class LLMManager:
         self.db_filename = db_filename
         self.api_key = api_key
         openai.api_key = self.api_key
+        self.retries = LLM_RETRIES
+        self.retry_delay_seconds = LLM_RETRY_DELAY_SECONDS
         self.connection = sqlite3.connect(self.db_filename)
         self.cursor = self.connection.cursor()
         self.create_tables()
@@ -136,17 +146,35 @@ class LLMManager:
 
             # Call OpenAI API
             client = openai.OpenAI(api_key=OPENAI_API_KEY)
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            response_json_text = response.model_dump_json()
-            content = response.choices[0].message.content
-            refusal = response.choices[0].message.refusal
-            finish_reason = response.choices[0].finish_reason
+
+            attempt = 0
+
+            while attempt < self.retries:
+                try:
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt},
+                        ],
+                    )
+                    response_json_text = response.model_dump_json()
+                    content = response.choices[0].message.content
+                    refusal = response.choices[0].message.refusal
+                    finish_reason = response.choices[0].finish_reason
+                    break
+                except Exception as e:
+                    attempt += 1
+                    if attempt >= self.retries:
+                        # If maximum attempts reached, re-raise the exception or handle it
+                        raise RuntimeError(
+                            f"Failed to generate response summary after {self.retries} attempts."
+                        ) from e
+                    else:
+                        # Optional: Log the error or provide feedback
+                        logger.warning(f"Attempt {attempt} failed: {e}. Retrying...")
+                        time.sleep(self.retry_delay_seconds)
+
             status = "success"
         except Exception as e:
             error_message = str(e)
